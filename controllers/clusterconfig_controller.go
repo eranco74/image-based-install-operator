@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/openshift/cluster-relocation-service/internal/certs"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -28,7 +30,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
-	errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -70,6 +71,7 @@ const (
 	extraManifestsDir          = "extra-manifests"
 	manifestsDir               = "manifests"
 	networkConfigDir           = "network-configuration"
+	certificatesDir            = "certs"
 	clusterConfigFinalizerName = "clusterconfig." + relocationv1alpha1.Group + "/deprovision"
 	caBundleFileName           = "tls-ca-bundle.pem"
 )
@@ -411,7 +413,30 @@ func (r *ClusterConfigReconciler) writeInputData(ctx context.Context, log logrus
 				}
 			}
 		}
+		CertificatesPath := filepath.Join(filesDir, certificatesDir)
+		if err := os.MkdirAll(CertificatesPath, 0700); err != nil {
+			return err
+		}
 
+		certManager := certs.CertManager{CertificatesDir: CertificatesPath}
+		// TODO: handle user provided API and ingress certs
+		if err := certManager.GenerateAllCertificates(); err != nil {
+			return fmt.Errorf("failed to generate certificates: %w", err)
+		}
+		kubeconfigBytes, err := certManager.GenerateKubeConfig(config.Spec.Domain)
+		if err != nil {
+			return fmt.Errorf("failed to generate kubeconfig: %w", err)
+		}
+		err = r.CreateKubeconfigSecret(ctx, config, kubeconfigBytes)
+		if err != nil {
+			return err
+		}
+		// This isn't required, it's just might be useful
+		kubeconfigFile := filepath.Join(CertificatesPath, "kubeconfig")
+		err = os.WriteFile(kubeconfigFile, kubeconfigBytes, 0644)
+		if err != nil {
+			return err
+		}
 		return nil
 	})
 	if lockErr != nil {
@@ -421,14 +446,36 @@ func (r *ClusterConfigReconciler) writeInputData(ctx context.Context, log logrus
 		return ctrl.Result{}, fmt.Errorf("failed to write input data: %w", funcErr)
 	}
 	if !locked {
-		log.Info("requeueing due to lock contention")
+		r.Log.Info("requeuing due to lock contention")
 		if updateErr := r.setImageReadyCondition(ctx, config, fmt.Errorf("could not acquire lock for image data")); updateErr != nil {
-			log.WithError(updateErr).Error("failed to update cluster config status")
+			r.Log.WithError(updateErr).Error("failed to update cluster config status")
 		}
 		return ctrl.Result{RequeueAfter: time.Second * 5}, nil
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func (r *ClusterConfigReconciler) CreateKubeconfigSecret(ctx context.Context, config *relocationv1alpha1.ClusterConfig, kubeconfigBytes []byte) error {
+	kubeconfigSecret := &corev1.Secret{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Secret",
+			APIVersion: corev1.SchemeGroupVersion.String(),
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      config.Spec.ClusterName + "-admin-kubeconfig",
+			Namespace: config.Namespace,
+		},
+		Data: map[string][]byte{
+			"kubeconfig": kubeconfigBytes,
+		},
+		Type: corev1.SecretTypeOpaque,
+	}
+	err := r.Client.Create(ctx, kubeconfigSecret)
+	if err != nil {
+		return fmt.Errorf("failed to create kubeconfig secret: %w", err)
+	}
+	return nil
 }
 
 func (r *ClusterConfigReconciler) writeClusterInfo(info *clusterinfo.ClusterInfo, file string) error {
