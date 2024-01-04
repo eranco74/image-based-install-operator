@@ -76,7 +76,7 @@ const (
 	caBundleFileName           = "tls-ca-bundle.pem"
 )
 
-//+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;create;watch
 //+kubebuilder:rbac:groups=relocation.openshift.io,resources=clusterconfigs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=relocation.openshift.io,resources=clusterconfigs/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=relocation.openshift.io,resources=clusterconfigs/finalizers,verbs=update
@@ -466,15 +466,20 @@ func (r *ClusterConfigReconciler) CreateKubeconfigSecret(ctx context.Context, co
 			Name:      config.Spec.ClusterName + "-admin-kubeconfig",
 			Namespace: config.Namespace,
 		},
-		Data: map[string][]byte{
-			"kubeconfig": kubeconfigBytes,
-		},
 		Type: corev1.SecretTypeOpaque,
 	}
-	err := r.Client.Create(ctx, kubeconfigSecret)
+	mutateFn := func() error {
+		// Update the Secret object with the desired data
+		kubeconfigSecret.Data = map[string][]byte{
+			"kubeconfig": kubeconfigBytes,
+		}
+		return nil
+	}
+	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, kubeconfigSecret, mutateFn)
 	if err != nil {
 		return fmt.Errorf("failed to create kubeconfig secret: %w", err)
 	}
+	r.Log.Infof("kubeconfig secret %s", op)
 	return nil
 }
 
