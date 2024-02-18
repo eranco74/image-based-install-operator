@@ -93,6 +93,8 @@ const (
 	nmstateCMKey                 = "network-config"
 	clusterInstallFinalizerName  = "imageclusterinstall." + v1alpha1.Group + "/deprovision"
 	caBundleFileName             = "tls-ca-bundle.pem"
+	imageBasedInstallInvoker     = "image-based-install"
+	invokerCMFileName            = "image-based-install-manifest.yaml"
 	imageDigestMirrorSetFileName = "image-digest-sources.json"
 )
 
@@ -384,6 +386,9 @@ func (r *ImageClusterInstallReconciler) writeInputData(ctx context.Context, log 
 
 	locked, lockErr, funcErr := filelock.WithWriteLock(lockDir, func() error {
 
+		if err := r.writeInvokerCM(filepath.Join(clusterConfigPath, invokerCMFileName)); err != nil {
+			return fmt.Errorf("failed to write ca bundle: %w", err)
+		}
 		if err := r.writeCABundle(ctx, ici.Spec.CABundleRef, ici.Namespace, filepath.Join(clusterConfigPath, caBundleFileName)); err != nil {
 			return fmt.Errorf("failed to write ca bundle: %w", err)
 		}
@@ -829,4 +834,28 @@ func (r *ImageClusterInstallReconciler) handleFinalizer(ctx context.Context, log
 	}
 
 	return ctrl.Result{}, true, removeFinalizer()
+}
+
+func (r *ImageClusterInstallReconciler) writeInvokerCM(filePath string) error {
+	cm := &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: corev1.SchemeGroupVersion.String(),
+			Kind:       "ConfigMap",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "openshift-config",
+			Name:      "openshift-install-manifests",
+		},
+		Data: map[string]string{
+			"invoker": imageBasedInstallInvoker,
+		},
+	}
+	data, err := json.Marshal(cm)
+	if err != nil {
+		return fmt.Errorf("failed to marshal openshift-install-manifests: %w", err)
+	}
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		return err
+	}
+	return nil
 }
