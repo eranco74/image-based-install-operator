@@ -211,7 +211,12 @@ func (r *ImageClusterInstallReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 	}
 
-	res, _, err := r.writeInputData(ctx, log, ici, clusterDeployment, bmh)
+	res, err := r.validateSeedReconfigurationWithBMH(ctx, log, ici, bmh)
+	if err != nil || !res.IsZero() {
+		return res, err
+	}
+
+	res, _, err = r.writeInputData(ctx, log, ici, clusterDeployment, bmh)
 	if !res.IsZero() || err != nil {
 		if err != nil {
 			if updateErr := r.setImageReadyCondition(ctx, ici, err); updateErr != nil {
@@ -236,11 +241,6 @@ func (r *ImageClusterInstallReconciler) Reconcile(ctx context.Context, req ctrl.
 			log.WithError(updateErr).Error("failed to update ImageClusterInstall status")
 		}
 		return ctrl.Result{}, err
-	}
-
-	res, err = r.validateSeedReconfigurationWithBMH(ctx, log, ici, bmh)
-	if err != nil || !res.IsZero() {
-		return res, err
 	}
 
 	if err := r.createBMHDataImage(ctx, log, bmh, imageUrl); err != nil {
@@ -324,7 +324,6 @@ func (r *ImageClusterInstallReconciler) validateSeedReconfigurationWithBMH(
 	}
 
 	var err error
-	clusterInfoFilePath := ""
 	defer func() {
 		reason := v1alpha1.HostValidationSucceeded
 		msg := v1alpha1.HostValidationsOKMsg
@@ -337,37 +336,28 @@ func (r *ImageClusterInstallReconciler) validateSeedReconfigurationWithBMH(
 			log.WithError(updateErr).Error("failed to update ImageClusterInstall status")
 		}
 	}()
-
-	clusterInfoFilePath, err = r.clusterInfoFilePath(ici)
-	if err != nil {
-		log.WithError(err).Error("failed to read cluster info file")
-		return ctrl.Result{}, err
-	}
-	clusterInfo := r.getClusterInfoFromFile(log, clusterInfoFilePath)
-
-	err = r.validateBMHMachineNetwork(clusterInfo, *bmh.Status.HardwareDetails)
+	err = r.validateBMHMachineNetwork(ici.Spec.MachineNetwork, *bmh.Status.HardwareDetails)
 	if err != nil {
 		log.WithError(err).Error("failed to validate BMH machine network")
 		return ctrl.Result{}, err
 	}
-
 	return ctrl.Result{}, nil
 }
 
 func (r *ImageClusterInstallReconciler) validateBMHMachineNetwork(
-	clusterInfo *lca_api.SeedReconfiguration,
+	machineNetwork string,
 	hwDetails bmh_v1alpha1.HardwareDetails) error {
-	if clusterInfo.MachineNetwork == "" {
+	if machineNetwork == "" {
 		return nil
 	}
 	for _, nic := range hwDetails.NIC {
-		inCIDR, _ := ipInCidr(nic.IP, clusterInfo.MachineNetwork)
+		inCIDR, _ := ipInCidr(nic.IP, machineNetwork)
 		if inCIDR {
 			return nil
 		}
 	}
 
-	return fmt.Errorf("bmh host doesn't have any nic with ip in provided machineNetwork %s", clusterInfo.MachineNetwork)
+	return fmt.Errorf("bmh host doesn't have any nic with ip in provided machineNetwork %s", machineNetwork)
 }
 
 func (r *ImageClusterInstallReconciler) mapBMHToICI(ctx context.Context, obj client.Object) []reconcile.Request {
